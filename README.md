@@ -15,7 +15,10 @@ live sync, works fine with no internet.
   your gallery. Photos are compressed automatically and stored right on the
   item, so they sync and work offline like everything else (no separate
   file storage to set up).
-- Search, and filter by category, condition, or "needs attention only".
+- Search, and filter by category, sub-category, condition, or "needs
+  attention only".
+- **History** button shows every quantity change (from the +/- buttons or
+  the edit form), grouped by month, so you can see what changed and when.
 - Summary bar: total items, total units, how many need attention.
 - Print button gives a clean printable stock list.
 - Works fully offline — edits save locally and sync to Supabase (and to
@@ -26,10 +29,13 @@ don't have to re-type them.
 
 ## Setup (one-time)
 
-1. **Supabase table.** In your `mataatua.marae@gmail.com` Supabase project
+1. **Supabase tables.** In your `mataatua.marae@gmail.com` Supabase project
    (the same one behind the Koha Tracker and Shopping List), open the SQL
    editor and run `supabase-schema.sql` from this folder. This creates the
-   `inventory_items` table — it does not touch your other tables.
+   `inventory_items` table and the `inventory_history` table (used by the
+   History view) — it does not touch your other tables. It's safe to
+   re-run any time you get a newer copy of this file (e.g. after the
+   History feature was added) — it only adds what's missing.
 
 2. **Connect the app to it.** In Supabase, go to Project Settings → API and
    copy the **Project URL** and **anon public** key. Paste them into

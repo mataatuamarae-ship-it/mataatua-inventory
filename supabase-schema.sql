@@ -64,3 +64,31 @@ begin
     alter publication supabase_realtime add table inventory_items;
   end if;
 end $$;
+
+-- Quantity history — a log of every quantity change, shown in the app's
+-- "History" view grouped by month. Rows are written whenever an item's
+-- quantity changes, and can be deleted individually or a whole month at a
+-- time from that same view.
+create table if not exists inventory_history (
+  id uuid primary key default gen_random_uuid(),
+  item_id uuid,
+  item_name text not null,
+  category text,
+  subcategory text default '',
+  old_quantity integer not null default 0,
+  new_quantity integer not null default 0,
+  changed_at timestamptz not null default now()
+);
+
+create index if not exists inventory_history_changed_at_idx on inventory_history (changed_at desc);
+
+alter table inventory_history enable row level security;
+
+drop policy if exists "public read" on inventory_history;
+create policy "public read" on inventory_history for select using (true);
+
+drop policy if exists "public insert" on inventory_history;
+create policy "public insert" on inventory_history for insert with check (true);
+
+drop policy if exists "public delete" on inventory_history;
+create policy "public delete" on inventory_history for delete using (true);

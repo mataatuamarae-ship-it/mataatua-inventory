@@ -8,6 +8,8 @@
 const LOCAL_KEY = "mataatua-inventory:items";
 const QUEUE_KEY = "mataatua-inventory:pending-ops";
 const CATEGORIES_KEY = "mataatua-inventory:categories";
+const HISTORY_KEY = "mataatua-inventory:history";
+const HISTORY_TOMBSTONE_KEY = "mataatua-inventory:history-tombstones";
 
 const CONDITION_LABEL = {
   good: "Good",
@@ -50,6 +52,82 @@ function queueOp(op) {
   const q = loadQueue();
   q.push(op);
   saveQueue(q);
+}
+
+// ---------- quantity history ----------
+//
+// Append-only log of quantity changes. Kept in Supabase (inventory_history
+// table) so every device sees the same history, with the same offline
+// queue-and-flush pattern as items — plus a local cache so the History view
+// still works instantly and while offline.
+
+function loadHistoryLocal() {
+  try {
+    return JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function saveHistoryLocal(list) {
+  localStorage.setItem(HISTORY_KEY, JSON.stringify(list));
+}
+
+async function recordHistory(entry) {
+  const row = {
+    id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random(),
+    ...entry,
+  };
+  saveHistoryLocal([...loadHistoryLocal(), row]);
+
+  if (supabaseClient) {
+    try {
+      const { error } = await supabaseClient.from("inventory_history").insert(row);
+      if (error) throw error;
+      return;
+    } catch (e) {
+      // fall through to queue
+    }
+  }
+  queueOp({ type: "history", row });
+}
+
+// Ids we've deleted locally but haven't confirmed deleted on Supabase yet
+// (e.g. deleted while offline). Kept out of the History view until the
+// delete actually goes through, so a deleted row doesn't reappear just
+// because it's still sitting in the remote table.
+function loadHistoryTombstones() {
+  try {
+    return JSON.parse(localStorage.getItem(HISTORY_TOMBSTONE_KEY) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function saveHistoryTombstones(list) {
+  localStorage.setItem(HISTORY_TOMBSTONE_KEY, JSON.stringify(list));
+}
+
+function addHistoryTombstone(id) {
+  const t = loadHistoryTombstones();
+  if (!t.includes(id)) {
+    t.push(id);
+    saveHistoryTombstones(t);
+  }
+}
+
+function clearHistoryTombstone(id) {
+  saveHistoryTombstones(loadHistoryTombstones().filter((x) => x !== id));
+}
+
+async function fetchHistoryRemote() {
+  const { data, error } = await supabaseClient
+    .from("inventory_history")
+    .select("*")
+    .order("changed_at", { ascending: false })
+    .limit(1000);
+  if (error) throw error;
+  return data;
 }
 
 // Categories added via "Manage categories" with no items yet (so they still
@@ -148,6 +226,13 @@ async function flushQueue() {
       } else if (op.type === "delete") {
         const { error } = await supabaseClient.from("inventory_items").delete().eq("id", op.id);
         if (error) throw error;
+      } else if (op.type === "history") {
+        const { error } = await supabaseClient.from("inventory_history").upsert(op.row);
+        if (error) throw error;
+      } else if (op.type === "history-delete") {
+        const { error } = await supabaseClient.from("inventory_history").delete().eq("id", op.id);
+        if (error) throw error;
+        clearHistoryTombstone(op.id);
       }
     } catch (e) {
       remaining.push(op);
@@ -231,10 +316,26 @@ function localDelete(id) {
 
 async function saveItem(row) {
   const isNew = !row.id;
+  const previous = isNew ? null : items.find((i) => i.id === row.id);
   if (isNew) {
     row.id = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
   }
   row.updated_at = new Date().toISOString();
+
+  const oldQty = previous ? (previous.quantity || 0) : 0;
+  const newQty = row.quantity || 0;
+  if (oldQty !== newQty && (previous || newQty > 0)) {
+    recordHistory({
+      item_id: row.id,
+      item_name: row.name,
+      category: row.category,
+      subcategory: row.subcategory || "",
+      old_quantity: oldQty,
+      new_quantity: newQty,
+      changed_at: row.updated_at,
+    }).catch(() => {});
+  }
+
   localUpsert(row);
   render();
 
@@ -734,6 +835,152 @@ function setupBackupRestore() {
   });
 }
 
+// ---------- history view ----------
+
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+async function loadHistoryForView() {
+  const local = loadHistoryLocal();
+  let combined;
+  if (!supabaseClient) {
+    combined = local;
+  } else {
+    try {
+      const remote = await fetchHistoryRemote();
+      // Merge: remote is the source of truth, but keep any locally-recorded
+      // entries that haven't made it to Supabase yet (still queued/offline).
+      const remoteIds = new Set(remote.map((h) => h.id));
+      const stillLocalOnly = local.filter((h) => !remoteIds.has(h.id));
+      combined = [...remote, ...stillLocalOnly];
+    } catch (e) {
+      console.warn("Couldn't fetch history from Supabase, showing local copy", e);
+      combined = local;
+    }
+  }
+  const tombstones = new Set(loadHistoryTombstones());
+  return combined.filter((h) => !tombstones.has(h.id));
+}
+
+async function renderHistoryView() {
+  const container = document.getElementById("history-list");
+  container.innerHTML = `<p class="category-manager-note">Loading…</p>`;
+  const history = (await loadHistoryForView()).slice().sort((a, b) => new Date(b.changed_at) - new Date(a.changed_at));
+
+  if (history.length === 0) {
+    container.innerHTML = `<p class="category-manager-note">No quantity changes recorded yet — adjustments made from now on will show up here.</p>`;
+    return;
+  }
+
+  const groups = {};
+  for (const h of history) {
+    const d = new Date(h.changed_at);
+    const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    (groups[key] ||= []).push(h);
+  }
+  const keys = Object.keys(groups).sort().reverse();
+
+  container.innerHTML = keys.map((key) => {
+    const [y, m] = key.split("-");
+    return `
+      <div class="history-month">
+        <div class="history-month-header">
+          <h3>${MONTH_NAMES[Number(m) - 1]} ${y}</h3>
+          <button type="button" class="btn-outline history-delete-month" data-month-key="${key}">Delete month</button>
+        </div>
+        <div class="history-rows">
+          ${groups[key].map(renderHistoryRow).join("")}
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  container.querySelectorAll("[data-delete-history]").forEach((btn) => {
+    btn.addEventListener("click", () => deleteHistoryEntry(btn.dataset.deleteHistory));
+  });
+  container.querySelectorAll(".history-delete-month").forEach((btn) => {
+    btn.addEventListener("click", () => deleteHistoryMonth(btn.dataset.monthKey));
+  });
+}
+
+function renderHistoryRow(h) {
+  const d = new Date(h.changed_at);
+  const dateStr = d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  const delta = h.new_quantity - h.old_quantity;
+  const deltaStr = delta > 0 ? `+${delta}` : `${delta}`;
+  const deltaClass = delta > 0 ? "history-up" : delta < 0 ? "history-down" : "history-flat";
+  const catLabel = [h.category, h.subcategory].filter(Boolean).join(" · ");
+  return `
+    <div class="history-row">
+      <span class="history-date">${dateStr}</span>
+      <span class="history-item">${esc(h.item_name)}${catLabel ? ` <span class="history-cat">(${esc(catLabel)})</span>` : ""}</span>
+      <span class="history-change">${h.old_quantity} → ${h.new_quantity} <span class="${deltaClass}">(${deltaStr})</span></span>
+      <button type="button" class="history-delete-row" data-delete-history="${h.id}" title="Delete this entry">✕</button>
+    </div>
+  `;
+}
+
+async function deleteHistoryEntry(id) {
+  if (!confirm("Delete this history entry?")) return;
+  addHistoryTombstone(id);
+  saveHistoryLocal(loadHistoryLocal().filter((h) => h.id !== id));
+  renderHistoryView();
+
+  if (supabaseClient) {
+    try {
+      const { error } = await supabaseClient.from("inventory_history").delete().eq("id", id);
+      if (error) throw error;
+      clearHistoryTombstone(id);
+      return;
+    } catch (e) {
+      // fall through to queue
+    }
+  }
+  queueOp({ type: "history-delete", id });
+}
+
+async function deleteHistoryMonth(key) {
+  const [y, m] = key.split("-");
+  const label = `${MONTH_NAMES[Number(m) - 1]} ${y}`;
+  const current = await loadHistoryForView();
+  const matching = current.filter((h) => {
+    const d = new Date(h.changed_at);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}` === key;
+  });
+  if (matching.length === 0) return;
+  if (!confirm(`Delete all ${matching.length} history entries from ${label}? This can't be undone.`)) return;
+
+  const matchingIds = new Set(matching.map((h) => h.id));
+  matchingIds.forEach(addHistoryTombstone);
+  saveHistoryLocal(loadHistoryLocal().filter((h) => !matchingIds.has(h.id)));
+  renderHistoryView();
+
+  for (const h of matching) {
+    if (supabaseClient) {
+      try {
+        const { error } = await supabaseClient.from("inventory_history").delete().eq("id", h.id);
+        if (error) throw error;
+        clearHistoryTombstone(h.id);
+        continue;
+      } catch (e) {
+        // fall through to queue
+      }
+    }
+    queueOp({ type: "history-delete", id: h.id });
+  }
+}
+
+function setupHistory() {
+  const dialog = document.getElementById("history-dialog");
+  document.getElementById("view-history-btn").addEventListener("click", () => {
+    dialog.showModal();
+    renderHistoryView();
+  });
+  document.getElementById("close-history-dialog-btn").addEventListener("click", () => dialog.close());
+}
+
 // ---------- category manager ----------
 
 function categoryItemCount(name) {
@@ -921,6 +1168,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     setupDialog();
     setupQuickCamera();
     setupCategoryManager();
+    setupHistory();
     setupInstall();
 
     items = loadLocal();

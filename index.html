@@ -48,6 +48,7 @@
       <button id="restore-btn" class="btn-outline">⬆ Restore</button>
       <input type="file" id="restore-input" accept="application/json" hidden>
       <button id="manage-categories-btn" class="btn-outline">Manage categories</button>
+      <button id="view-history-btn" class="btn-outline">🕒 History</button>
       <button id="add-item-btn" class="btn-primary">+ Add item</button>
     </div>
 
@@ -124,6 +125,17 @@
       <div class="dialog-actions">
         <span></span>
         <button type="button" id="close-category-dialog-btn" class="btn-outline">Close</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="history-dialog">
+    <div class="category-manager">
+      <h2>Quantity history</h2>
+      <div id="history-list"></div>
+      <div class="dialog-actions">
+        <span></span>
+        <button type="button" id="close-history-dialog-btn" class="btn-outline">Close</button>
       </div>
     </div>
   </dialog>
