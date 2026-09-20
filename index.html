@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mataatua Inventory</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#5b3a29">
+<link rel="icon" href="favicon.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Inventory">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="header-top">
+      <h1>Mataatua Inventory</h1>
+      <span id="status-pill" class="status-pill">checking…</span>
+    </div>
+    <div class="summary-row" id="summary-row"></div>
+    <button id="install-btn" class="install-btn" hidden>⬇ Install app</button>
+    <p id="ios-install-hint" class="ios-install-hint" hidden>
+      To install: tap <strong>Share</strong> → <strong>Add to Home Screen</strong>.
+    </p>
+  </header>
+
+  <main>
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="Search items…" autocomplete="off">
+      <select id="category-filter">
+        <option value="">All categories</option>
+      </select>
+      <select id="subcategory-filter">
+        <option value="">All sub-categories</option>
+      </select>
+      <select id="condition-filter">
+        <option value="">All conditions</option>
+        <option value="good">Good</option>
+        <option value="needs_repair">Needs repair</option>
+        <option value="damaged">Damaged</option>
+        <option value="missing">Missing</option>
+      </select>
+      <button id="attention-toggle" class="btn-outline">⚠ Needs attention only</button>
+      <button id="print-btn" class="btn-outline">Print summary</button>
+      <button id="backup-btn" class="btn-outline">⬇ Backup</button>
+      <button id="restore-btn" class="btn-outline">⬆ Restore</button>
+      <input type="file" id="restore-input" accept="application/json" hidden>
+      <button id="manage-categories-btn" class="btn-outline">Manage categories</button>
+      <button id="add-item-btn" class="btn-primary">+ Add item</button>
+    </div>
+
+    <div id="categories"></div>
+    <p id="empty-state" class="empty-state" hidden>No items match your search/filters.</p>
+    <input type="file" id="quick-photo-input" accept="image/*" capture="environment" hidden>
+  </main>
+
+  <dialog id="item-dialog">
+    <form id="item-form" method="dialog">
+      <h2 id="dialog-title">Add item</h2>
+      <input type="hidden" id="item-id">
+
+      <label>Category
+        <select id="item-category" required></select>
+      </label>
+      <input id="item-category-new" placeholder="New category name" hidden>
+
+      <label>Sub-category <span class="optional-label">(optional)</span>
+        <select id="item-subcategory"></select>
+      </label>
+      <input id="item-subcategory-new" placeholder="New sub-category name" hidden>
+
+      <label>Item name
+        <input id="item-name" required>
+      </label>
+
+      <label>Quantity
+        <input id="item-quantity" type="number" min="0" step="1" required>
+      </label>
+
+      <label>Condition
+        <select id="item-condition">
+          <option value="good">Good</option>
+          <option value="needs_repair">Needs repair</option>
+          <option value="damaged">Damaged</option>
+          <option value="missing">Missing</option>
+        </select>
+      </label>
+
+      <label>Notes
+        <textarea id="item-notes" rows="2" placeholder="e.g. 6 chipped, box needs re-taping"></textarea>
+      </label>
+
+      <label>Photo
+        <input type="file" id="item-photo-input" accept="image/*" capture="environment">
+      </label>
+      <div id="photo-preview-wrap" class="photo-preview-wrap" hidden>
+        <img id="photo-preview" alt="Item photo">
+        <button type="button" id="remove-photo-btn" class="btn-outline">Remove photo</button>
+      </div>
+
+      <div class="dialog-actions">
+        <button type="button" id="delete-item-btn" class="btn-danger" hidden>Delete</button>
+        <div class="dialog-actions-right">
+          <button type="button" id="cancel-dialog-btn" class="btn-outline">Cancel</button>
+          <button type="submit" class="btn-primary">Save</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="category-dialog">
+    <div class="category-manager">
+      <h2>Manage categories</h2>
+      <div id="category-list-manager"></div>
+      <form id="add-category-form" class="add-category-row">
+        <input id="new-category-input" placeholder="New category name" required>
+        <button type="submit" class="btn-primary">+ Add</button>
+      </form>
+      <p class="category-manager-note">
+        Renaming or deleting updates every item in that category.
+      </p>
+      <div class="dialog-actions">
+        <span></span>
+        <button type="button" id="close-category-dialog-btn" class="btn-outline">Close</button>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="config.js"></script>
+  <script src="seed-data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
