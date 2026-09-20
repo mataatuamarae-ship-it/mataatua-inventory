@@ -1,6 +1,6 @@
 // Minimal offline shell cache — lets the app open with no connection.
 // Data itself is cached separately in localStorage by app.js.
-const CACHE_NAME = "mataatua-inventory-v3";
+const CACHE_NAME = "mataatua-inventory-v5";
 const SHELL_FILES = [
   "./",
   "./index.html",
@@ -38,10 +38,16 @@ self.addEventListener("fetch", (event) => {
   // Never cache Supabase API calls — always go to the network for data.
   if (url.hostname.endsWith("supabase.co")) return;
 
+  // Network-first: when there's signal, always use the freshest copy of the
+  // app (so updates show up without anyone having to clear their cache).
+  // Only fall back to the cached copy when there's no connection at all.
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached;
-      return fetch(event.request).catch(() => cached);
-    })
+    fetch(event.request)
+      .then((response) => {
+        const copy = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        return response;
+      })
+      .catch(() => caches.match(event.request))
   );
 });

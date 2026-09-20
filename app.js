@@ -943,11 +943,38 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     }
 
-    if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("sw.js").catch(() => {});
-    }
+    setupAutoUpdate();
   } catch (e) {
     console.error("App failed to start", e);
     setStatus("error — see console", "offline");
   }
 });
+
+// ---------- auto-update ----------
+//
+// Whenever a newer version of the app is deployed, this makes the page
+// reload itself to pick it up — nobody has to manually clear their
+// browser's cache or reinstall the app on each device.
+
+function setupAutoUpdate() {
+  if (!("serviceWorker" in navigator)) return;
+
+  navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).then((reg) => {
+    // Check for a newer sw.js right away, then again whenever the tab
+    // regains focus (covers the common case of reopening an installed app).
+    reg.update().catch(() => {});
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") reg.update().catch(() => {});
+    });
+  }).catch(() => {});
+
+  // Once a new service worker takes over, reload so the fresh files
+  // (index.html, app.js, etc.) actually get used instead of sitting
+  // installed-but-unused until the next manual refresh.
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (reloaded) return;
+    reloaded = true;
+    window.location.reload();
+  });
+}
