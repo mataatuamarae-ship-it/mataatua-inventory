@@ -7,6 +7,7 @@
 
 const LOCAL_KEY = "mataatua-inventory:items";
 const QUEUE_KEY = "mataatua-inventory:pending-ops";
+const CATEGORIES_KEY = "mataatua-inventory:categories";
 
 const CONDITION_LABEL = {
   good: "Good",
@@ -17,7 +18,7 @@ const CONDITION_LABEL = {
 
 let supabaseClient = null;
 let items = [];
-let filters = { search: "", category: "", condition: "", attentionOnly: false };
+let filters = { search: "", category: "", subcategory: "", condition: "", attentionOnly: false };
 
 // ---------- storage helpers ----------
 
@@ -49,6 +50,29 @@ function queueOp(op) {
   const q = loadQueue();
   q.push(op);
   saveQueue(q);
+}
+
+// Categories added via "Manage categories" with no items yet (so they still
+// show up in dropdowns). This list lives only on this device — it's just a
+// convenience for offering the name before anything uses it; as soon as an
+// item is saved with that category, the category itself is synced as part
+// of that item like everything else.
+function loadExtraCategories() {
+  try {
+    return JSON.parse(localStorage.getItem(CATEGORIES_KEY) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function saveExtraCategories(list) {
+  localStorage.setItem(CATEGORIES_KEY, JSON.stringify(list));
+}
+
+function getAllCategoryNames() {
+  const fromItems = items.map((i) => i.category).filter(Boolean);
+  const fromExtra = loadExtraCategories();
+  return [...new Set([...fromItems, ...fromExtra])].sort((a, b) => a.localeCompare(b));
 }
 
 // ---------- supabase setup ----------
@@ -100,6 +124,7 @@ async function seedIfEmpty() {
   if (remote.length > 0) return remote;
   const seed = (window.SEED_DATA || []).map((s) => ({
     category: s.category,
+    subcategory: "",
     name: s.name,
     quantity: s.quantity,
     condition: "good",
@@ -139,6 +164,7 @@ function seedLocalIfEmpty() {
   const seed = (window.SEED_DATA || []).map((s) => ({
     id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random(),
     category: s.category,
+    subcategory: "",
     name: s.name,
     quantity: s.quantity,
     condition: "good",
@@ -256,6 +282,7 @@ function matchesFilters(item) {
   const s = filters.search.trim().toLowerCase();
   if (s && !item.name.toLowerCase().includes(s) && !item.category.toLowerCase().includes(s)) return false;
   if (filters.category && item.category !== filters.category) return false;
+  if (filters.subcategory && (item.subcategory || "") !== filters.subcategory) return false;
   if (filters.condition && item.condition !== filters.condition) return false;
   if (filters.attentionOnly && item.condition === "good") return false;
   return true;
@@ -279,7 +306,7 @@ function renderSummary() {
 }
 
 function renderFilterOptions() {
-  const categories = [...new Set(items.map((i) => i.category))].sort();
+  const categories = getAllCategoryNames();
   const sel = document.getElementById("category-filter");
   const current = sel.value;
   sel.innerHTML = '<option value="">All categories</option>' +
@@ -288,6 +315,18 @@ function renderFilterOptions() {
 
   document.getElementById("category-list").innerHTML =
     categories.map((c) => `<option value="${esc(c)}">`).join("");
+
+  // Sub-category filter: only the sub-categories that exist within the
+  // currently selected category (or all of them, if no category is picked).
+  const relevant = items.filter((i) => !filters.category || i.category === filters.category);
+  const subcats = [...new Set(relevant.map((i) => i.subcategory).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const subSel = document.getElementById("subcategory-filter");
+  const currentSub = subSel.value;
+  subSel.innerHTML = '<option value="">All sub-categories</option>' +
+    subcats.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
+  subSel.value = subcats.includes(currentSub) ? currentSub : "";
+  if (!subcats.includes(currentSub)) filters.subcategory = "";
+  subSel.closest(".toolbar") && (subSel.hidden = subcats.length === 0);
 }
 
 function renderCategories() {
@@ -302,16 +341,41 @@ function renderCategories() {
   document.getElementById("empty-state").hidden = filtered.length > 0;
 
   container.innerHTML = categoryNames.map((cat) => {
-    const rows = byCategory[cat].sort((a, b) => a.name.localeCompare(b.name));
+    const rows = byCategory[cat];
+    const hasSubcats = rows.some((r) => r.subcategory);
+
+    let itemsHtml;
+    if (hasSubcats) {
+      const bySub = {};
+      for (const row of rows) {
+        (bySub[row.subcategory || "Uncategorised"] ||= []).push(row);
+      }
+      const subNames = Object.keys(bySub).sort((a, b) => {
+        if (a === "Uncategorised") return 1;
+        if (b === "Uncategorised") return -1;
+        return a.localeCompare(b);
+      });
+      itemsHtml = subNames.map((sub) => `
+        <h3 class="subcategory-header">${esc(sub)}</h3>
+        <div class="item-list">
+          ${bySub[sub].sort((a, b) => a.name.localeCompare(b.name)).map(renderRow).join("")}
+        </div>
+      `).join("");
+    } else {
+      itemsHtml = `
+        <div class="item-list">
+          ${rows.slice().sort((a, b) => a.name.localeCompare(b.name)).map(renderRow).join("")}
+        </div>
+      `;
+    }
+
     return `
       <section class="category-block">
         <div class="category-header">
           <h2>${esc(cat)}</h2>
           <span class="count">${rows.length} items · ${rows.reduce((s, r) => s + (r.quantity || 0), 0)} units</span>
         </div>
-        <div class="item-list">
-          ${rows.map(renderRow).join("")}
-        </div>
+        ${itemsHtml}
       </section>
     `;
   }).join("");
@@ -442,13 +506,24 @@ function showPhotoPreview(url) {
   }
 }
 
+function updateSubcategorySuggestions(category) {
+  const suggestions = [...new Set(
+    items.filter((i) => i.category === category && i.subcategory).map((i) => i.subcategory)
+  )].sort((a, b) => a.localeCompare(b));
+  document.getElementById("subcategory-list").innerHTML =
+    suggestions.map((c) => `<option value="${esc(c)}">`).join("");
+}
+
 function openDialog(id) {
   const dialog = document.getElementById("item-dialog");
   const item = id ? items.find((i) => i.id === id) : null;
 
   document.getElementById("dialog-title").textContent = item ? "Edit item" : "Add item";
   document.getElementById("item-id").value = item ? item.id : "";
-  document.getElementById("item-category").value = item ? item.category : (filters.category || "");
+  const category = item ? item.category : (filters.category || "");
+  document.getElementById("item-category").value = category;
+  document.getElementById("item-subcategory").value = item ? item.subcategory || "" : "";
+  updateSubcategorySuggestions(category);
   document.getElementById("item-name").value = item ? item.name : "";
   document.getElementById("item-quantity").value = item ? item.quantity : 0;
   document.getElementById("item-condition").value = item ? item.condition : "good";
@@ -467,6 +542,9 @@ function setupDialog() {
   const dialog = document.getElementById("item-dialog");
   document.getElementById("add-item-btn").addEventListener("click", () => openDialog(null));
   document.getElementById("cancel-dialog-btn").addEventListener("click", () => dialog.close());
+  document.getElementById("item-category").addEventListener("input", (e) => {
+    updateSubcategorySuggestions(e.target.value.trim());
+  });
 
   document.getElementById("item-photo-input").addEventListener("change", async (e) => {
     const file = e.target.files[0];
@@ -492,6 +570,7 @@ function setupDialog() {
     const row = {
       id: document.getElementById("item-id").value || null,
       category: document.getElementById("item-category").value.trim(),
+      subcategory: document.getElementById("item-subcategory").value.trim(),
       name: document.getElementById("item-name").value.trim(),
       quantity: Number(document.getElementById("item-quantity").value) || 0,
       condition: document.getElementById("item-condition").value,
@@ -511,6 +590,189 @@ function setupDialog() {
   });
 }
 
+// ---------- backup / restore ----------
+
+function backupData() {
+  const payload = {
+    app: "mataatua-inventory",
+    exported_at: new Date().toISOString(),
+    items,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const stamp = new Date().toISOString().slice(0, 10);
+  a.href = url;
+  a.download = `mataatua-inventory-backup-${stamp}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function parseBackupFile(text) {
+  const data = JSON.parse(text);
+  const list = Array.isArray(data) ? data : data.items;
+  if (!Array.isArray(list)) throw new Error("This doesn't look like a backup file (no item list found).");
+  return list.filter((row) => row && typeof row === "object" && row.name && row.category);
+}
+
+async function restoreFromBackup(file) {
+  let list;
+  try {
+    const text = await file.text();
+    list = parseBackupFile(text);
+  } catch (e) {
+    alert("Couldn't read that backup file: " + e.message);
+    return;
+  }
+  if (list.length === 0) {
+    alert("That backup file has no items in it.");
+    return;
+  }
+  const ok = confirm(
+    `Restore ${list.length} item(s) from this backup?\n\n` +
+    `Items with a matching ID will be overwritten with the backup's values. ` +
+    `Anything already here that isn't in the backup will be left alone.`
+  );
+  if (!ok) return;
+
+  for (const row of list) {
+    await saveItem({
+      id: row.id || null,
+      category: String(row.category),
+      subcategory: row.subcategory ? String(row.subcategory) : "",
+      name: String(row.name),
+      quantity: Number(row.quantity) || 0,
+      condition: ["good", "needs_repair", "damaged", "missing"].includes(row.condition) ? row.condition : "good",
+      notes: row.notes ? String(row.notes) : "",
+      photo_url: row.photo_url || null,
+    });
+  }
+  alert(`Restored ${list.length} item(s).`);
+}
+
+function setupBackupRestore() {
+  document.getElementById("backup-btn").addEventListener("click", backupData);
+  const restoreInput = document.getElementById("restore-input");
+  document.getElementById("restore-btn").addEventListener("click", () => restoreInput.click());
+  restoreInput.addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (file) await restoreFromBackup(file);
+  });
+}
+
+// ---------- category manager ----------
+
+function categoryItemCount(name) {
+  return items.filter((i) => i.category === name).length;
+}
+
+function renderCategoryManager() {
+  const names = getAllCategoryNames();
+  const container = document.getElementById("category-list-manager");
+  if (names.length === 0) {
+    container.innerHTML = `<p class="category-manager-note">No categories yet — add one below.</p>`;
+    return;
+  }
+  container.innerHTML = names.map((name) => `
+    <div class="category-row" data-category="${esc(name)}">
+      <input type="text" value="${esc(name)}" data-rename-input>
+      <span class="category-count">${categoryItemCount(name)} item(s)</span>
+      <button type="button" class="btn-outline" data-rename-btn>Rename</button>
+      <button type="button" class="btn-danger" data-delete-btn>Delete</button>
+    </div>
+  `).join("");
+
+  container.querySelectorAll("[data-rename-btn]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const row = btn.closest(".category-row");
+      const oldName = row.dataset.category;
+      const newName = row.querySelector("[data-rename-input]").value.trim();
+      renameCategory(oldName, newName);
+    });
+  });
+  container.querySelectorAll("[data-delete-btn]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const row = btn.closest(".category-row");
+      deleteCategory(row.dataset.category);
+    });
+  });
+}
+
+async function renameCategory(oldName, newName) {
+  if (!newName || newName === oldName) return;
+  const affected = items.filter((i) => i.category === oldName);
+  const ok = affected.length === 0
+    ? true
+    : confirm(`Rename "${oldName}" to "${newName}"? This updates ${affected.length} item(s).`);
+  if (!ok) return;
+
+  for (const item of affected) {
+    await saveItem({ ...item, category: newName });
+  }
+
+  const extra = loadExtraCategories();
+  const idx = extra.indexOf(oldName);
+  if (idx >= 0) extra[idx] = newName;
+  else if (affected.length === 0) extra.push(newName);
+  saveExtraCategories([...new Set(extra)]);
+
+  render();
+  renderCategoryManager();
+}
+
+async function deleteCategory(name) {
+  const affected = items.filter((i) => i.category === name);
+  if (affected.length > 0) {
+    const others = getAllCategoryNames().filter((c) => c !== name);
+    const destination = prompt(
+      `"${name}" has ${affected.length} item(s) in it. Type another category to move them into ` +
+      `(or leave blank to cancel):\n\nExisting categories: ${others.join(", ") || "(none yet)"}`
+    );
+    if (!destination || !destination.trim()) return;
+    for (const item of affected) {
+      await saveItem({ ...item, category: destination.trim() });
+    }
+  } else {
+    if (!confirm(`Delete the empty category "${name}"?`)) return;
+  }
+
+  saveExtraCategories(loadExtraCategories().filter((c) => c !== name));
+  render();
+  renderCategoryManager();
+}
+
+function addCategory(name) {
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  if (getAllCategoryNames().includes(trimmed)) {
+    alert(`"${trimmed}" already exists.`);
+    return;
+  }
+  const extra = loadExtraCategories();
+  extra.push(trimmed);
+  saveExtraCategories(extra);
+  render();
+  renderCategoryManager();
+}
+
+function setupCategoryManager() {
+  const dialog = document.getElementById("category-dialog");
+  document.getElementById("manage-categories-btn").addEventListener("click", () => {
+    renderCategoryManager();
+    dialog.showModal();
+  });
+  document.getElementById("close-category-dialog-btn").addEventListener("click", () => dialog.close());
+  document.getElementById("add-category-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const input = document.getElementById("new-category-input");
+    addCategory(input.value);
+    input.value = "";
+  });
+}
+
 // ---------- toolbar ----------
 
 function setupToolbar() {
@@ -520,6 +782,11 @@ function setupToolbar() {
   });
   document.getElementById("category-filter").addEventListener("change", (e) => {
     filters.category = e.target.value;
+    filters.subcategory = "";
+    render();
+  });
+  document.getElementById("subcategory-filter").addEventListener("change", (e) => {
+    filters.subcategory = e.target.value;
     renderCategories();
   });
   document.getElementById("condition-filter").addEventListener("change", (e) => {
@@ -579,8 +846,10 @@ window.addEventListener("offline", () => setStatus("offline", "offline"));
 document.addEventListener("DOMContentLoaded", async () => {
   try {
     setupToolbar();
+    setupBackupRestore();
     setupDialog();
     setupQuickCamera();
+    setupCategoryManager();
     setupInstall();
 
     items = loadLocal();
