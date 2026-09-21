@@ -10,6 +10,31 @@ const QUEUE_KEY = "mataatua-inventory:pending-ops";
 const CATEGORIES_KEY = "mataatua-inventory:categories";
 const HISTORY_KEY = "mataatua-inventory:history";
 const HISTORY_TOMBSTONE_KEY = "mataatua-inventory:history-tombstones";
+const DEVICE_NAME_KEY = "mataatua-inventory:device-name";
+
+// A name for this device/browser, shown against each history entry so you
+// can tell which phone/tablet/computer made a change. Asked for once, the
+// first time it's needed, then remembered — changeable any time from the
+// History view. This is per-device only (not synced) — it just labels
+// entries this device creates.
+function getDeviceName() {
+  const stored = localStorage.getItem(DEVICE_NAME_KEY);
+  if (stored) return stored;
+  return setDeviceName();
+}
+
+function setDeviceName() {
+  const current = localStorage.getItem(DEVICE_NAME_KEY) || "";
+  const name = prompt(
+    "What should we call this device? (e.g. \"Jim's phone\", \"Kitchen tablet\")\n\n" +
+    "This is shown next to changes in the History view.",
+    current
+  );
+  const trimmed = (name || "").trim();
+  const finalName = trimmed || current || "Unknown device";
+  localStorage.setItem(DEVICE_NAME_KEY, finalName);
+  return finalName;
+}
 
 const CONDITION_LABEL = {
   good: "Good",
@@ -333,6 +358,7 @@ async function saveItem(row) {
       old_quantity: oldQty,
       new_quantity: newQty,
       changed_at: row.updated_at,
+      device_name: getDeviceName(),
     }).catch(() => {});
   }
 
@@ -912,10 +938,11 @@ function renderHistoryRow(h) {
   const deltaStr = delta > 0 ? `+${delta}` : `${delta}`;
   const deltaClass = delta > 0 ? "history-up" : delta < 0 ? "history-down" : "history-flat";
   const catLabel = [h.category, h.subcategory].filter(Boolean).join(" · ");
+  const deviceLabel = h.device_name ? ` <span class="history-device">— ${esc(h.device_name)}</span>` : "";
   return `
     <div class="history-row">
       <span class="history-date">${dateStr}</span>
-      <span class="history-item">${esc(h.item_name)}${catLabel ? ` <span class="history-cat">(${esc(catLabel)})</span>` : ""}</span>
+      <span class="history-item">${esc(h.item_name)}${catLabel ? ` <span class="history-cat">(${esc(catLabel)})</span>` : ""}${deviceLabel}</span>
       <span class="history-change">${h.old_quantity} → ${h.new_quantity} <span class="${deltaClass}">(${deltaStr})</span></span>
       <button type="button" class="history-delete-row" data-delete-history="${h.id}" title="Delete this entry">✕</button>
     </div>
@@ -972,13 +999,23 @@ async function deleteHistoryMonth(key) {
   }
 }
 
+function refreshDeviceNameLabel() {
+  document.getElementById("device-name-label").textContent =
+    localStorage.getItem(DEVICE_NAME_KEY) || "(not set yet)";
+}
+
 function setupHistory() {
   const dialog = document.getElementById("history-dialog");
   document.getElementById("view-history-btn").addEventListener("click", () => {
     dialog.showModal();
     renderHistoryView();
+    refreshDeviceNameLabel();
   });
   document.getElementById("close-history-dialog-btn").addEventListener("click", () => dialog.close());
+  document.getElementById("change-device-btn").addEventListener("click", () => {
+    setDeviceName();
+    refreshDeviceNameLabel();
+  });
 }
 
 // ---------- category manager ----------

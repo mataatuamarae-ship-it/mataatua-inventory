@@ -439,3 +439,24 @@ dialog::backdrop { background: rgba(0,0,0,0.4); }
 .history-flat {
   color: #6b5b4d;
 }
+
+.history-device {
+  color: #6b5b4d;
+  font-size: 0.78rem;
+  font-style: italic;
+}
+
+.history-device-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.82rem;
+  color: #4a3d33;
+  padding-bottom: 4px;
+}
+
+.history-device-row button {
+  font-size: 0.72rem;
+  padding: 3px 8px;
+}

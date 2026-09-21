@@ -77,8 +77,13 @@ create table if not exists inventory_history (
   subcategory text default '',
   old_quantity integer not null default 0,
   new_quantity integer not null default 0,
-  changed_at timestamptz not null default now()
+  changed_at timestamptz not null default now(),
+  device_name text default ''
 );
+
+-- If you already created this table before device names were added, this
+-- picks up the new column without touching your existing history rows.
+alter table inventory_history add column if not exists device_name text default '';
 
 create index if not exists inventory_history_changed_at_idx on inventory_history (changed_at desc);
 
