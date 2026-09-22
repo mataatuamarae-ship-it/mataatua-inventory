@@ -1,6 +1,6 @@
 // Minimal offline shell cache — lets the app open with no connection.
 // Data itself is cached separately in localStorage by app.js.
-const CACHE_NAME = "mataatua-inventory-v9";
+const CACHE_NAME = "mataatua-inventory-v11";
 const SHELL_FILES = [
   "./",
   "./index.html",

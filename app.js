@@ -522,6 +522,12 @@ function renderCategories() {
       openQuickCamera(btn.dataset.cameraId);
     });
   });
+  container.querySelectorAll("[data-view-id]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openPhotoView(btn.dataset.viewId);
+    });
+  });
 }
 
 function renderRow(item) {
@@ -529,9 +535,15 @@ function renderRow(item) {
   const thumb = item.photo_url
     ? `<img class="item-thumb" src="${item.photo_url}" alt="">`
     : `<span class="item-thumb-placeholder">📷</span>`;
+  const viewBtn = item.photo_url
+    ? `<button type="button" class="view-photo-btn" data-view-id="${item.id}" title="Open photo">🔍</button>`
+    : "";
   return `
     <div class="item-row" data-id="${item.id}">
-      <button type="button" class="thumb-btn" data-camera-id="${item.id}" title="Take/change photo">${thumb}</button>
+      <div class="thumb-wrap">
+        <button type="button" class="thumb-btn" data-camera-id="${item.id}" title="Take/change photo">${thumb}</button>
+        ${viewBtn}
+      </div>
       <div>
         <span class="item-name">${esc(item.name)}</span>
         ${notes}
@@ -556,33 +568,74 @@ function esc(s) {
 // Photos are stored as compressed JPEG data URLs directly on the item —
 // no separate storage bucket to set up, and they sync/work offline exactly
 // like every other field.
-function resizeImageFile(file, maxDim = 900, quality = 0.6) {
+function loadImageViaObjectUrl(file) {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(reader.error || new Error("Could not read file"));
-    reader.onload = () => {
-      const img = new Image();
-      img.onerror = () => reject(new Error("Could not read image"));
-      img.onload = () => {
-        let { width, height } = img;
-        if (width > maxDim || height > maxDim) {
-          if (width > height) {
-            height = Math.round(height * (maxDim / width));
-            width = maxDim;
-          } else {
-            width = Math.round(width * (maxDim / height));
-            height = maxDim;
-          }
-        }
-        const canvas = document.createElement("canvas");
-        canvas.width = width;
-        canvas.height = height;
-        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
-        resolve(canvas.toDataURL("image/jpeg", quality));
-      };
-      img.src = reader.result;
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Could not read image"));
     };
-    reader.readAsDataURL(file);
+    img.src = url;
+    img.dataset.objectUrl = url;
+  });
+}
+
+// Loading the source image via createImageBitmap (falling back to an
+// <img> + object URL) avoids ever building a full base64 copy of the
+// original camera photo in memory — on some Android phones a big photo
+// (10MB+) made that step fail intermittently. We only build a data URL
+// once, from the already-downscaled canvas.
+function loadImageSource(file) {
+  if (window.createImageBitmap) {
+    return createImageBitmap(file).catch(() => loadImageViaObjectUrl(file));
+  }
+  return loadImageViaObjectUrl(file);
+}
+
+function resizeImageFile(file, maxDim = 900, quality = 0.6) {
+  return loadImageSource(file)
+    .catch(() => {
+      throw new Error("Could not read image");
+    })
+    .then((img) => {
+      let width = img.width;
+      let height = img.height;
+      if (width > maxDim || height > maxDim) {
+        if (width > height) {
+          height = Math.round(height * (maxDim / width));
+          width = maxDim;
+        } else {
+          width = Math.round(width * (maxDim / height));
+          height = maxDim;
+        }
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+      if (typeof img.close === "function") img.close();
+      if (img.dataset && img.dataset.objectUrl) URL.revokeObjectURL(img.dataset.objectUrl);
+      return canvas.toDataURL("image/jpeg", quality);
+    });
+}
+
+// ---------- photo viewer (open the magnifier icon on a row) ----------
+
+function openPhotoView(itemId) {
+  const item = items.find((i) => i.id === itemId);
+  if (!item || !item.photo_url) return;
+  document.getElementById("photo-view-img").src = item.photo_url;
+  document.getElementById("photo-view-dialog").showModal();
+}
+
+function setupPhotoView() {
+  document.getElementById("close-photo-view-btn").addEventListener("click", () => {
+    document.getElementById("photo-view-dialog").close();
+  });
+  document.getElementById("photo-view-dialog").addEventListener("close", () => {
+    document.getElementById("photo-view-img").src = "";
   });
 }
 
@@ -1204,6 +1257,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     setupBackupRestore();
     setupDialog();
     setupQuickCamera();
+    setupPhotoView();
     setupCategoryManager();
     setupHistory();
     setupInstall();
