@@ -575,50 +575,93 @@ function loadImageViaObjectUrl(file) {
     img.onload = () => resolve(img);
     img.onerror = () => {
       URL.revokeObjectURL(url);
-      reject(new Error("Could not read image"));
+      reject(new Error("object-url decode failed"));
     };
     img.src = url;
     img.dataset.objectUrl = url;
   });
 }
 
-// Loading the source image via createImageBitmap (falling back to an
-// <img> + object URL) avoids ever building a full base64 copy of the
-// original camera photo in memory — on some Android phones a big photo
-// (10MB+) made that step fail intermittently. We only build a data URL
-// once, from the already-downscaled canvas.
+function loadImageViaDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error || new Error("file read failed"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("data-url decode failed"));
+      img.onload = () => resolve(img);
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+// Try up to three ways to decode the photo, from cheapest-on-memory to
+// most compatible, so a phone/browser quirk in one method doesn't sink
+// the whole thing. If all three fail, the error message says which
+// methods were tried and why, so a report from the field is actually
+// diagnosable instead of a generic "couldn't read it".
 function loadImageSource(file) {
+  const attempts = [];
+  let chain = Promise.reject(null);
   if (window.createImageBitmap) {
-    return createImageBitmap(file).catch(() => loadImageViaObjectUrl(file));
+    chain = chain.catch(() =>
+      createImageBitmap(file).catch((err) => {
+        attempts.push("createImageBitmap: " + describeErr(err));
+        throw err;
+      })
+    );
   }
-  return loadImageViaObjectUrl(file);
+  chain = chain.catch(() =>
+    loadImageViaObjectUrl(file).catch((err) => {
+      attempts.push("object-url: " + describeErr(err));
+      throw err;
+    })
+  );
+  chain = chain.catch(() =>
+    loadImageViaDataUrl(file).catch((err) => {
+      attempts.push("data-url: " + describeErr(err));
+      throw err;
+    })
+  );
+  return chain.catch(() => {
+    throw new Error(attempts.join(" | ") || "no decode method available");
+  });
+}
+
+function describeErr(err) {
+  if (!err) return "unknown";
+  return err.message || err.name || String(err);
 }
 
 function resizeImageFile(file, maxDim = 900, quality = 0.6) {
-  return loadImageSource(file)
-    .catch(() => {
-      throw new Error("Could not read image");
-    })
-    .then((img) => {
-      let width = img.width;
-      let height = img.height;
-      if (width > maxDim || height > maxDim) {
-        if (width > height) {
-          height = Math.round(height * (maxDim / width));
-          width = maxDim;
-        } else {
-          width = Math.round(width * (maxDim / height));
-          height = maxDim;
-        }
+  return loadImageSource(file).then((img) => {
+    let width = img.width;
+    let height = img.height;
+    if (!width || !height) {
+      throw new Error(`image had no size (${width}x${height}, type ${file.type || "unknown"}, ${file.size} bytes)`);
+    }
+    if (width > maxDim || height > maxDim) {
+      if (width > height) {
+        height = Math.round(height * (maxDim / width));
+        width = maxDim;
+      } else {
+        width = Math.round(width * (maxDim / height));
+        height = maxDim;
       }
-      const canvas = document.createElement("canvas");
-      canvas.width = width;
-      canvas.height = height;
-      canvas.getContext("2d").drawImage(img, 0, 0, width, height);
-      if (typeof img.close === "function") img.close();
-      if (img.dataset && img.dataset.objectUrl) URL.revokeObjectURL(img.dataset.objectUrl);
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+    if (typeof img.close === "function") img.close();
+    if (img.dataset && img.dataset.objectUrl) URL.revokeObjectURL(img.dataset.objectUrl);
+    try {
       return canvas.toDataURL("image/jpeg", quality);
-    });
+    } catch (err) {
+      throw new Error("canvas export failed: " + describeErr(err));
+    }
+  });
 }
 
 // ---------- photo viewer (open the magnifier icon on a row) ----------
@@ -660,7 +703,7 @@ function setupQuickCamera() {
       await saveItem({ ...item, photo_url: dataUrl });
     } catch (err) {
       console.warn("Could not process photo", err);
-      alert("Sorry, couldn't read that photo — try another one.");
+      alert("Sorry, couldn't read that photo — try another one.\n\n(" + (err && err.message ? err.message : "unknown error") + ")");
     }
   });
 }
@@ -800,7 +843,7 @@ function setupDialog() {
       showPhotoPreview(dataUrl);
     } catch (err) {
       console.warn("Could not process photo", err);
-      alert("Sorry, couldn't read that photo — try another one.");
+      alert("Sorry, couldn't read that photo — try another one.\n\n(" + (err && err.message ? err.message : "unknown error") + ")");
     }
   });
 
