@@ -57,8 +57,42 @@ function loadLocal() {
   }
 }
 
+// Best-effort localStorage write: never throws. Returns true on success.
+// A failed write here should never abort a save — Supabase is the real
+// source of truth for the synced app; the local copy is just a fast/
+// offline mirror of it.
+function safeSetItem(key, value) {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch (e) {
+    console.warn("localStorage write failed for", key, e);
+    return false;
+  }
+}
+
+// The local mirror of `items` is what makes the app open instantly and
+// work offline — but on a device with many items, embedded photos can
+// push it over the browser's localStorage quota (typically 5-10MB).
+// Supabase has no such limit, so a photo is never actually lost — if
+// the full list won't fit locally, we keep photos on only the most
+// recently updated items in the local copy (older ones just show their
+// placeholder until they're re-fetched from Supabase) rather than let
+// the whole save fail.
 function saveLocal(list) {
-  localStorage.setItem(LOCAL_KEY, JSON.stringify(list));
+  if (safeSetItem(LOCAL_KEY, JSON.stringify(list))) return;
+
+  console.warn("Local item cache is full — trimming older cached photos to fit.");
+  const byRecency = [...list].sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
+  const keepPhotoIds = new Set(byRecency.slice(0, 25).map((i) => i.id));
+  const trimmed = list.map((item) =>
+    item.photo_url && !keepPhotoIds.has(item.id) ? { ...item, photo_url: null } : item
+  );
+  if (safeSetItem(LOCAL_KEY, JSON.stringify(trimmed))) return;
+
+  console.warn("Still over quota with recent photos only — dropping all cached photos locally.");
+  const noPhotos = list.map((item) => (item.photo_url ? { ...item, photo_url: null } : item));
+  safeSetItem(LOCAL_KEY, JSON.stringify(noPhotos));
 }
 
 function loadQueue() {
@@ -70,7 +104,7 @@ function loadQueue() {
 }
 
 function saveQueue(q) {
-  localStorage.setItem(QUEUE_KEY, JSON.stringify(q));
+  safeSetItem(QUEUE_KEY, JSON.stringify(q));
 }
 
 function queueOp(op) {
@@ -95,7 +129,7 @@ function loadHistoryLocal() {
 }
 
 function saveHistoryLocal(list) {
-  localStorage.setItem(HISTORY_KEY, JSON.stringify(list));
+  safeSetItem(HISTORY_KEY, JSON.stringify(list));
 }
 
 async function recordHistory(entry) {
@@ -130,7 +164,7 @@ function loadHistoryTombstones() {
 }
 
 function saveHistoryTombstones(list) {
-  localStorage.setItem(HISTORY_TOMBSTONE_KEY, JSON.stringify(list));
+  safeSetItem(HISTORY_TOMBSTONE_KEY, JSON.stringify(list));
 }
 
 function addHistoryTombstone(id) {
@@ -169,7 +203,7 @@ function loadExtraCategories() {
 }
 
 function saveExtraCategories(list) {
-  localStorage.setItem(CATEGORIES_KEY, JSON.stringify(list));
+  safeSetItem(CATEGORIES_KEY, JSON.stringify(list));
 }
 
 function getAllCategoryNames() {
