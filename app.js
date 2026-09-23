@@ -15,13 +15,43 @@
 // look-up-only link to whānau, not for anything sensitive.
 const READONLY_MODE = new URLSearchParams(location.search).get("view") === "readonly";
 
+// Which categories a view-only link is allowed to show, read straight off
+// its own URL (?categories=Kitchen,Bedding) — baked in by whoever built the
+// link (see buildShareLink). No param at all means "show everything".
+const READONLY_CATEGORY_FILTER = READONLY_MODE
+  ? (new URLSearchParams(location.search).get("categories") || "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+  : [];
+
+function applyReadonlyCategoryFilter(list) {
+  if (!READONLY_MODE || READONLY_CATEGORY_FILTER.length === 0) return list;
+  return list.filter((item) => READONLY_CATEGORY_FILTER.includes(item.category));
+}
+
+// Bakes the categories chosen in Manage categories ("Show in view-only
+// link") directly into the URL, so the link shows the right thing on
+// whatever device it's opened on — not just this one. Returns null when
+// every category is currently hidden, so the caller can stop and say so
+// instead of handing out a link to an empty app.
 function buildShareLink() {
-  return location.origin + location.pathname + "?view=readonly";
+  const allCats = getAllCategoryNames();
+  const hidden = loadHiddenViewOnlyCategories();
+  const visible = allCats.filter((c) => !hidden.includes(c));
+  if (allCats.length > 0 && visible.length === 0) return null;
+
+  let url = location.origin + location.pathname + "?view=readonly";
+  if (visible.length > 0 && visible.length < allCats.length) {
+    url += "&categories=" + encodeURIComponent(visible.join(","));
+  }
+  return url;
 }
 
 const LOCAL_KEY = "mataatua-inventory:items";
 const QUEUE_KEY = "mataatua-inventory:pending-ops";
 const CATEGORIES_KEY = "mataatua-inventory:categories";
+const VIEW_ONLY_HIDDEN_CATEGORIES_KEY = "mataatua-inventory:view-only-hidden-categories";
 const HISTORY_KEY = "mataatua-inventory:history";
 const HISTORY_TOMBSTONE_KEY = "mataatua-inventory:history-tombstones";
 const DEVICE_NAME_KEY = "mataatua-inventory:device-name";
@@ -226,6 +256,36 @@ function getAllCategoryNames() {
   return [...new Set([...fromItems, ...fromExtra])].sort((a, b) => a.localeCompare(b));
 }
 
+// Which categories are left out of the view-only link — set once here (in
+// Manage categories), used by every view-only link generated after that
+// until changed again. Lives only on this device, same as extra categories
+// do — but that's fine, because the chosen set gets baked directly into
+// each link's URL when it's created (see buildShareLink), so the link
+// itself carries the restriction to whoever opens it, on any device.
+function loadHiddenViewOnlyCategories() {
+  try {
+    return JSON.parse(localStorage.getItem(VIEW_ONLY_HIDDEN_CATEGORIES_KEY) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+function saveHiddenViewOnlyCategories(list) {
+  safeSetItem(VIEW_ONLY_HIDDEN_CATEGORIES_KEY, JSON.stringify(list));
+}
+
+function isCategoryHiddenFromViewOnly(name) {
+  return loadHiddenViewOnlyCategories().includes(name);
+}
+
+function setCategoryHiddenFromViewOnly(name, hidden) {
+  const list = loadHiddenViewOnlyCategories();
+  const idx = list.indexOf(name);
+  if (hidden && idx < 0) list.push(name);
+  if (!hidden && idx >= 0) list.splice(idx, 1);
+  saveHiddenViewOnlyCategories(list);
+}
+
 // ---------- supabase setup ----------
 
 function isConfigured() {
@@ -340,18 +400,19 @@ async function syncAll() {
   if (READONLY_MODE) {
     if (!supabaseClient) {
       setStatus("viewing local copy — not connected", "offline");
-      items = loadLocal();
+      items = applyReadonlyCategoryFilter(loadLocal());
       render();
       return;
     }
     setStatus("loading…", "syncing");
     try {
-      items = await fetchRemote();
-      saveLocal(items);
+      const fetched = await fetchRemote();
+      saveLocal(fetched); // cache the full list, unfiltered
+      items = applyReadonlyCategoryFilter(fetched);
       setStatus("live", "online");
     } catch (e) {
       console.warn("Fetch failed, using local cache", e);
-      items = loadLocal();
+      items = applyReadonlyCategoryFilter(loadLocal());
       setStatus("offline — showing last loaded copy", "offline");
     }
     render();
@@ -1097,6 +1158,10 @@ function setupBackupRestore() {
 
 async function copyShareLink() {
   const link = buildShareLink();
+  if (!link) {
+    alert("Every category is hidden from view-only links right now — turn at least one back on in Manage categories first.");
+    return;
+  }
   try {
     await navigator.clipboard.writeText(link);
     alert("View-only link copied — paste it into a text, WhatsApp, email, wherever.");
@@ -1109,6 +1174,10 @@ async function copyShareLink() {
 
 function emailShareLink() {
   const link = buildShareLink();
+  if (!link) {
+    alert("Every category is hidden from view-only links right now — turn at least one back on in Manage categories first.");
+    return;
+  }
   const subject = "Mataatua Inventory (view only)";
   const body =
     "Here's a view-only link to the Mataatua Inventory — you can look things up, " +
@@ -1121,7 +1190,8 @@ function setupShareLink() {
   document.getElementById("copy-share-link-btn").addEventListener("click", () => {
     copyShareLink().catch((e) => {
       console.warn("Could not copy share link", e);
-      prompt("Copy this view-only link:", buildShareLink());
+      const link = buildShareLink();
+      if (link) prompt("Copy this view-only link:", link);
     });
   });
   document.getElementById("email-share-link-btn").addEventListener("click", emailShareLink);
@@ -1301,6 +1371,10 @@ function renderCategoryManager() {
     <div class="category-row" data-category="${esc(name)}">
       <input type="text" value="${esc(name)}" data-rename-input>
       <span class="category-count">${categoryItemCount(name)} item(s)</span>
+      <label class="view-only-checkbox">
+        <input type="checkbox" data-visible-checkbox ${isCategoryHiddenFromViewOnly(name) ? "" : "checked"}>
+        Show in view-only link
+      </label>
       <button type="button" class="btn-outline" data-rename-btn>Rename</button>
       <button type="button" class="btn-danger" data-delete-btn>Delete</button>
     </div>
@@ -1318,6 +1392,12 @@ function renderCategoryManager() {
     btn.addEventListener("click", () => {
       const row = btn.closest(".category-row");
       deleteCategory(row.dataset.category);
+    });
+  });
+  container.querySelectorAll("[data-visible-checkbox]").forEach((cb) => {
+    cb.addEventListener("change", () => {
+      const row = cb.closest(".category-row");
+      setCategoryHiddenFromViewOnly(row.dataset.category, !cb.checked);
     });
   });
 }
@@ -1340,6 +1420,11 @@ async function renameCategory(oldName, newName) {
   else if (affected.length === 0) extra.push(newName);
   saveExtraCategories([...new Set(extra)]);
 
+  if (isCategoryHiddenFromViewOnly(oldName)) {
+    setCategoryHiddenFromViewOnly(oldName, false);
+    setCategoryHiddenFromViewOnly(newName, true);
+  }
+
   render();
   renderCategoryManager();
 }
@@ -1361,6 +1446,7 @@ async function deleteCategory(name) {
   }
 
   saveExtraCategories(loadExtraCategories().filter((c) => c !== name));
+  setCategoryHiddenFromViewOnly(name, false);
   render();
   renderCategoryManager();
 }
@@ -1487,7 +1573,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     setupHistory();
     setupInstall();
 
-    items = loadLocal();
+    items = applyReadonlyCategoryFilter(loadLocal());
     render();
 
     try {
