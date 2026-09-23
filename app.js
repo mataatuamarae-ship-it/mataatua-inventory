@@ -5,10 +5,19 @@
 // no connection; writes go to Supabase when reachable, otherwise they queue
 // and flush once back online. Realtime keeps other devices in sync.
 
-// Live, view-only mirror of this app (mataatua-inventory-readonly) — same
-// Supabase data, but nobody can change anything from it. This is what the
-// share/email buttons below point people to.
-const READONLY_APP_URL = "https://mataatuamarae-ship-it.github.io/mataatua-inventory-readonly/";
+// View-only mode: same app, same live Supabase data, reached with
+// ?view=readonly on the URL — no separate app/repo/deploy needed. When
+// this is set, every control that changes data is hidden (see the
+// "readonly-mode" CSS rules in style.css and the guards below), leaving
+// only search/filter/print/history-viewing/photo-viewing. This is a
+// UI-level lock, not real security — anyone who edits the URL by hand
+// could still reach the full app — so it's meant for texting/emailing a
+// look-up-only link to whānau, not for anything sensitive.
+const READONLY_MODE = new URLSearchParams(location.search).get("view") === "readonly";
+
+function buildShareLink() {
+  return location.origin + location.pathname + "?view=readonly";
+}
 
 const LOCAL_KEY = "mataatua-inventory:items";
 const QUEUE_KEY = "mataatua-inventory:pending-ops";
@@ -325,6 +334,30 @@ function seedLocalIfEmpty() {
 }
 
 async function syncAll() {
+  // Read-only mode never writes anything — not a queued edit, not the
+  // first-run seed — so it takes its own simpler, read-only path: fetch
+  // and show, nothing else.
+  if (READONLY_MODE) {
+    if (!supabaseClient) {
+      setStatus("viewing local copy — not connected", "offline");
+      items = loadLocal();
+      render();
+      return;
+    }
+    setStatus("loading…", "syncing");
+    try {
+      items = await fetchRemote();
+      saveLocal(items);
+      setStatus("live", "online");
+    } catch (e) {
+      console.warn("Fetch failed, using local cache", e);
+      items = loadLocal();
+      setStatus("offline — showing last loaded copy", "offline");
+    }
+    render();
+    return;
+  }
+
   if (!supabaseClient) {
     setStatus("working locally — not synced", "offline");
     items = seedLocalIfEmpty();
@@ -545,6 +578,7 @@ function renderCategories() {
 
   container.querySelectorAll(".item-row").forEach((el) => {
     el.addEventListener("click", (e) => {
+      if (READONLY_MODE) return;
       if (e.target.closest(".qty-controls")) return;
       openDialog(el.dataset.id);
     });
@@ -1057,26 +1091,28 @@ function setupBackupRestore() {
 
 // ---------- share view-only link ----------
 //
-// Points people at the separate read-only app (same live Supabase data,
-// nothing editable) instead of this one — for texting/emailing to whānau
-// who just need to look something up, not touch it.
+// Builds a link back to this same app with ?view=readonly on it, so
+// there's nothing separate to deploy or keep in sync — for texting/
+// emailing to whānau who just need to look something up, not touch it.
 
 async function copyShareLink() {
+  const link = buildShareLink();
   try {
-    await navigator.clipboard.writeText(READONLY_APP_URL);
+    await navigator.clipboard.writeText(link);
     alert("View-only link copied — paste it into a text, WhatsApp, email, wherever.");
   } catch (e) {
     // Clipboard access blocked (permissions, non-secure context, etc.) —
     // fall back to just showing the link so it can be copied by hand.
-    prompt("Copy this view-only link:", READONLY_APP_URL);
+    prompt("Copy this view-only link:", link);
   }
 }
 
 function emailShareLink() {
+  const link = buildShareLink();
   const subject = "Mataatua Inventory (view only)";
   const body =
     "Here's a view-only link to the Mataatua Inventory — you can look things up, " +
-    "search and filter, but nothing can be changed from it:\n\n" + READONLY_APP_URL;
+    "search and filter, but nothing can be changed from it:\n\n" + link;
   window.location.href =
     "mailto:?subject=" + encodeURIComponent(subject) + "&body=" + encodeURIComponent(body);
 }
@@ -1085,7 +1121,7 @@ function setupShareLink() {
   document.getElementById("copy-share-link-btn").addEventListener("click", () => {
     copyShareLink().catch((e) => {
       console.warn("Could not copy share link", e);
-      prompt("Copy this view-only link:", READONLY_APP_URL);
+      prompt("Copy this view-only link:", buildShareLink());
     });
   });
   document.getElementById("email-share-link-btn").addEventListener("click", emailShareLink);
@@ -1387,6 +1423,16 @@ function setupToolbar() {
   document.getElementById("print-btn").addEventListener("click", () => window.print());
 }
 
+// ---------- read-only mode ----------
+
+function setupReadonlyMode() {
+  if (!READONLY_MODE) return;
+  document.body.classList.add("readonly-mode");
+  document.title = "Mataatua Inventory (View Only)";
+  const tag = document.getElementById("view-only-tag");
+  if (tag) tag.hidden = false;
+}
+
 // ---------- install prompt ----------
 
 let deferredInstallPrompt = null;
@@ -1430,6 +1476,7 @@ window.addEventListener("offline", () => setStatus("offline", "offline"));
 
 document.addEventListener("DOMContentLoaded", async () => {
   try {
+    setupReadonlyMode();
     setupToolbar();
     setupBackupRestore();
     setupShareLink();

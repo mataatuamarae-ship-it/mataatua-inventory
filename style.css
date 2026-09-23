@@ -40,6 +40,18 @@ body {
   margin: 0;
 }
 
+.view-only-tag {
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: rgba(255,255,255,0.2);
+  padding: 2px 8px;
+  border-radius: 999px;
+  vertical-align: middle;
+  margin-left: 6px;
+}
+
 .status-pill {
   font-size: 0.75rem;
   padding: 3px 10px;
@@ -495,4 +507,37 @@ dialog::backdrop { background: rgba(0,0,0,0.4); }
 .history-device-row button {
   font-size: 0.72rem;
   padding: 3px 8px;
+}
+
+/* ---- read-only mode (?view=readonly) ----
+   UI-level lock only: hides/disables everything that changes data, so a
+   shared view-only link only shows search/filter/print/photo-view/history.
+   Someone editing the URL by hand could still reach the full app. */
+
+body.readonly-mode #add-item-btn,
+body.readonly-mode #manage-categories-btn,
+body.readonly-mode #clear-all-btn,
+body.readonly-mode #restore-btn,
+body.readonly-mode #copy-share-link-btn,
+body.readonly-mode #email-share-link-btn {
+  display: none;
+}
+
+body.readonly-mode .qty-controls button {
+  display: none;
+}
+
+body.readonly-mode .thumb-btn {
+  pointer-events: none;
+  cursor: default;
+}
+
+body.readonly-mode .item-row {
+  cursor: default;
+}
+
+body.readonly-mode .history-device-row,
+body.readonly-mode .history-delete-row,
+body.readonly-mode .history-delete-month {
+  display: none;
 }
