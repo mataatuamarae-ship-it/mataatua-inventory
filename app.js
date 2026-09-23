@@ -5,6 +5,11 @@
 // no connection; writes go to Supabase when reachable, otherwise they queue
 // and flush once back online. Realtime keeps other devices in sync.
 
+// Live, view-only mirror of this app (mataatua-inventory-readonly) — same
+// Supabase data, but nobody can change anything from it. This is what the
+// share/email buttons below point people to.
+const READONLY_APP_URL = "https://mataatuamarae-ship-it.github.io/mataatua-inventory-readonly/";
+
 const LOCAL_KEY = "mataatua-inventory:items";
 const QUEUE_KEY = "mataatua-inventory:pending-ops";
 const CATEGORIES_KEY = "mataatua-inventory:categories";
@@ -980,8 +985,67 @@ async function restoreFromBackup(file) {
   alert(`Restored ${list.length} item(s).`);
 }
 
+// Wipes every item and history entry for EVERYONE — this is the shared
+// Supabase database, not just this device, so a deletion here removes it
+// for every phone/tablet/computer using this app. Deliberately hard to
+// trigger by accident: a confirm dialog explaining exactly that, then a
+// typed "DELETE" before anything happens. Requires being online, since
+// this has to actually reach Supabase rather than being queued.
+async function clearAllData() {
+  if (!supabaseClient) {
+    alert("This device needs to be online to clear the shared data — try again once connected.");
+    return;
+  }
+  const ok = confirm(
+    "This permanently deletes EVERY item, photo and history entry — for everyone, on every device that uses this app. " +
+    "This cannot be undone.\n\n" +
+    "If you want a copy first, cancel this and use the Backup button instead.\n\n" +
+    "Continue?"
+  );
+  if (!ok) return;
+  const typed = prompt('Type DELETE (in capitals) to confirm you want to erase everything for everyone:');
+  if (typed !== "DELETE") {
+    alert("Cancelled — nothing was deleted.");
+    return;
+  }
+
+  setStatus("clearing…", "syncing");
+  try {
+    // A delete with no matching real row ever equals this all-zero id,
+    // so this removes every row in the table.
+    const NIL = "00000000-0000-0000-0000-000000000000";
+    const { error: e1 } = await supabaseClient.from("inventory_history").delete().neq("id", NIL);
+    if (e1) throw e1;
+    const { error: e2 } = await supabaseClient.from("inventory_items").delete().neq("id", NIL);
+    if (e2) throw e2;
+  } catch (e) {
+    alert("Couldn't clear the shared data: " + (e && e.message ? e.message : e));
+    setStatus("online", "online");
+    return;
+  }
+
+  // Clear every local trace too, including anything still queued from
+  // before this — it would only try to recreate what we just deleted.
+  items = [];
+  saveLocal(items);
+  saveHistoryLocal([]);
+  saveHistoryTombstones([]);
+  saveQueue([]);
+  saveExtraCategories([]);
+  filters = { search: "", category: "", subcategory: "", condition: "", attentionOnly: false };
+  render();
+  setStatus("online", "online");
+  alert("All data has been cleared for everyone.");
+}
+
 function setupBackupRestore() {
   document.getElementById("backup-btn").addEventListener("click", backupData);
+  document.getElementById("clear-all-btn").addEventListener("click", () => {
+    clearAllData().catch((e) => {
+      console.warn("Could not clear data", e);
+      alert("Something went wrong: " + (e && e.message ? e.message : e));
+    });
+  });
   const restoreInput = document.getElementById("restore-input");
   document.getElementById("restore-btn").addEventListener("click", () => restoreInput.click());
   restoreInput.addEventListener("change", async (e) => {
@@ -989,6 +1053,42 @@ function setupBackupRestore() {
     e.target.value = "";
     if (file) await restoreFromBackup(file);
   });
+}
+
+// ---------- share view-only link ----------
+//
+// Points people at the separate read-only app (same live Supabase data,
+// nothing editable) instead of this one — for texting/emailing to whānau
+// who just need to look something up, not touch it.
+
+async function copyShareLink() {
+  try {
+    await navigator.clipboard.writeText(READONLY_APP_URL);
+    alert("View-only link copied — paste it into a text, WhatsApp, email, wherever.");
+  } catch (e) {
+    // Clipboard access blocked (permissions, non-secure context, etc.) —
+    // fall back to just showing the link so it can be copied by hand.
+    prompt("Copy this view-only link:", READONLY_APP_URL);
+  }
+}
+
+function emailShareLink() {
+  const subject = "Mataatua Inventory (view only)";
+  const body =
+    "Here's a view-only link to the Mataatua Inventory — you can look things up, " +
+    "search and filter, but nothing can be changed from it:\n\n" + READONLY_APP_URL;
+  window.location.href =
+    "mailto:?subject=" + encodeURIComponent(subject) + "&body=" + encodeURIComponent(body);
+}
+
+function setupShareLink() {
+  document.getElementById("copy-share-link-btn").addEventListener("click", () => {
+    copyShareLink().catch((e) => {
+      console.warn("Could not copy share link", e);
+      prompt("Copy this view-only link:", READONLY_APP_URL);
+    });
+  });
+  document.getElementById("email-share-link-btn").addEventListener("click", emailShareLink);
 }
 
 // ---------- history view ----------
@@ -1332,6 +1432,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   try {
     setupToolbar();
     setupBackupRestore();
+    setupShareLink();
     setupDialog();
     setupQuickCamera();
     setupPhotoView();
