@@ -22,7 +22,10 @@ alter table inventory_items add column if not exists subcategory text default ''
 
 create index if not exists inventory_items_category_idx on inventory_items (category);
 
--- Keep updated_at current on every edit
+-- Keep updated_at current on every insert and edit — the database is the
+-- single source of truth for this column; the app no longer sends its own
+-- value for it (see withoutLocalUpdatedAt in app.js), so this needs to run
+-- on insert too, not just update, or new rows would land with a null.
 create or replace function set_updated_at()
 returns trigger as $$
 begin
@@ -33,7 +36,7 @@ $$ language plpgsql;
 
 drop trigger if exists inventory_items_set_updated_at on inventory_items;
 create trigger inventory_items_set_updated_at
-  before update on inventory_items
+  before insert or update on inventory_items
   for each row execute function set_updated_at();
 
 -- Open access via the anon key (same approach as the other marae apps —

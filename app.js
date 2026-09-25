@@ -354,7 +354,7 @@ async function flushQueue() {
   for (const op of q) {
     try {
       if (op.type === "upsert") {
-        const { error } = await supabaseClient.from("inventory_items").upsert(op.row);
+        const { error } = await supabaseClient.from("inventory_items").upsert(withoutLocalUpdatedAt(op.row));
         if (error) throw error;
       } else if (op.type === "delete") {
         const { error } = await supabaseClient.from("inventory_items").delete().eq("id", op.id);
@@ -452,13 +452,66 @@ function subscribeRealtime() {
   if (!supabaseClient) return;
   supabaseClient
     .channel("inventory-changes")
-    .on("postgres_changes", { event: "*", schema: "public", table: "inventory_items" }, () => {
-      syncAll();
+    .on("postgres_changes", { event: "*", schema: "public", table: "inventory_items" }, (payload) => {
+      applyRealtimeChange(payload);
     })
     .subscribe();
 }
 
+// Applies just the one row a realtime event is about, instead of
+// re-fetching the whole item list (photos included) on every single
+// change from anywhere — that full-refetch-per-edit pattern is what was
+// driving egress usage up. A periodic full syncAll() (see the
+// visibilitychange listener in the boot sequence) still runs as a
+// safety net, so a missed or out-of-order event self-heals.
+function applyRealtimeChange(payload) {
+  const type = payload.eventType || payload.event;
+
+  if (type === "DELETE") {
+    const id = payload.old && payload.old.id;
+    if (!id) return;
+    if (READONLY_MODE) {
+      items = items.filter((i) => i.id !== id);
+    } else {
+      localDelete(id);
+    }
+    render();
+    return;
+  }
+
+  const row = payload.new;
+  if (!row || !row.id) return;
+
+  if (READONLY_MODE) {
+    const allowed = READONLY_CATEGORY_FILTER.length === 0 || READONLY_CATEGORY_FILTER.includes(row.category);
+    const idx = items.findIndex((i) => i.id === row.id);
+    if (allowed) {
+      if (idx >= 0) items[idx] = row;
+      else items.push(row);
+    } else if (idx >= 0) {
+      items.splice(idx, 1);
+    }
+    render();
+    return;
+  }
+
+  localUpsert(row);
+  render();
+}
+
 // ---------- CRUD ----------
+
+// The database sets updated_at itself, on both insert and update (see the
+// set_updated_at trigger in supabase-schema.sql) — it's the single source
+// of truth for that column. The client still stamps a local updated_at on
+// `row` for its own immediate/optimistic use (sorting which items keep
+// their cached photo locally, see saveLocal), but that value is stripped
+// out before anything is actually sent to Supabase, so it never fights
+// with what the trigger sets.
+function withoutLocalUpdatedAt(row) {
+  const { updated_at, ...rest } = row;
+  return rest;
+}
 
 function localUpsert(row) {
   const idx = items.findIndex((i) => i.id === row.id);
@@ -500,7 +553,7 @@ async function saveItem(row) {
 
   if (supabaseClient) {
     try {
-      const { error } = await supabaseClient.from("inventory_items").upsert(row);
+      const { error } = await supabaseClient.from("inventory_items").upsert(withoutLocalUpdatedAt(row));
       if (error) throw error;
       setStatus("online", "online");
       return;
@@ -587,6 +640,13 @@ function renderFilterOptions() {
 }
 
 function renderCategories() {
+  // Any real render pass means we have something to show one way or
+  // another (items, or a genuine empty state) — so the "first ever load,
+  // nothing cached yet" placeholder is done regardless of which of those
+  // this particular pass turns out to be.
+  const loadingEl = document.getElementById("loading-state");
+  if (loadingEl) loadingEl.hidden = true;
+
   const container = document.getElementById("categories");
   const filtered = items.filter(matchesFilters);
   const byCategory = {};
@@ -1020,11 +1080,13 @@ function setupDialog() {
 
 // ---------- backup / restore ----------
 
-function backupData() {
+async function backupData() {
+  const history = await loadHistoryForView();
   const payload = {
     app: "mataatua-inventory",
     exported_at: new Date().toISOString(),
     items,
+    history,
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -1042,25 +1104,64 @@ function parseBackupFile(text) {
   const data = JSON.parse(text);
   const list = Array.isArray(data) ? data : data.items;
   if (!Array.isArray(list)) throw new Error("This doesn't look like a backup file (no item list found).");
-  return list.filter((row) => row && typeof row === "object" && row.name && row.category);
+  const items = list.filter((row) => row && typeof row === "object" && row.name && row.category);
+  // Older backups (from before history was included) simply won't have
+  // this key — that's fine, it just means nothing to restore there.
+  const historyRaw = Array.isArray(data.history) ? data.history : [];
+  const history = historyRaw.filter((row) => row && typeof row === "object" && row.item_name);
+  return { items, history };
+}
+
+// Writes one history entry back exactly as it was in the backup — same id
+// and changed_at, not a freshly-generated one — so restoring is an upsert
+// (overwrite-if-matching) rather than creating duplicate log entries.
+async function restoreHistoryEntry(entry) {
+  const row = {
+    id: entry.id || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()),
+    item_id: entry.item_id || null,
+    item_name: String(entry.item_name || ""),
+    category: entry.category ? String(entry.category) : "",
+    subcategory: entry.subcategory ? String(entry.subcategory) : "",
+    old_quantity: Number(entry.old_quantity) || 0,
+    new_quantity: Number(entry.new_quantity) || 0,
+    changed_at: entry.changed_at || new Date().toISOString(),
+    device_name: entry.device_name ? String(entry.device_name) : "",
+  };
+  saveHistoryLocal([...loadHistoryLocal().filter((h) => h.id !== row.id), row]);
+
+  if (supabaseClient) {
+    try {
+      const { error } = await supabaseClient.from("inventory_history").upsert(row);
+      if (error) throw error;
+      return;
+    } catch (e) {
+      // fall through to queue
+    }
+  }
+  queueOp({ type: "history", row });
 }
 
 async function restoreFromBackup(file) {
-  let list;
+  let parsed;
   try {
     const text = await file.text();
-    list = parseBackupFile(text);
+    parsed = parseBackupFile(text);
   } catch (e) {
     alert("Couldn't read that backup file: " + e.message);
     return;
   }
-  if (list.length === 0) {
-    alert("That backup file has no items in it.");
+  const { items: list, history: historyList } = parsed;
+  if (list.length === 0 && historyList.length === 0) {
+    alert("That backup file has no items or history in it.");
     return;
   }
+
+  const parts = [];
+  if (list.length > 0) parts.push(`${list.length} item(s)`);
+  if (historyList.length > 0) parts.push(`${historyList.length} history entr${historyList.length === 1 ? "y" : "ies"}`);
   const ok = confirm(
-    `Restore ${list.length} item(s) from this backup?\n\n` +
-    `Items with a matching ID will be overwritten with the backup's values. ` +
+    `Restore ${parts.join(" and ")} from this backup?\n\n` +
+    `Anything with a matching ID will be overwritten with the backup's values. ` +
     `Anything already here that isn't in the backup will be left alone.`
   );
   if (!ok) return;
@@ -1077,7 +1178,21 @@ async function restoreFromBackup(file) {
       photo_url: row.photo_url || null,
     });
   }
-  alert(`Restored ${list.length} item(s).`);
+
+  // A history entry that was deliberately deleted on this device (its id
+  // is tombstoned) stays deleted — an old backup shouldn't resurrect it.
+  const tombstones = new Set(loadHistoryTombstones());
+  let restoredHistoryCount = 0;
+  for (const entry of historyList) {
+    if (entry.id && tombstones.has(entry.id)) continue;
+    await restoreHistoryEntry(entry);
+    restoredHistoryCount++;
+  }
+
+  const summary = [];
+  if (list.length > 0) summary.push(`${list.length} item(s)`);
+  if (restoredHistoryCount > 0) summary.push(`${restoredHistoryCount} history entr${restoredHistoryCount === 1 ? "y" : "ies"}`);
+  alert(`Restored ${summary.join(" and ") || "nothing (everything was skipped)"}.`);
 }
 
 // Wipes every item and history entry for EVERYONE — this is the shared
@@ -1134,7 +1249,12 @@ async function clearAllData() {
 }
 
 function setupBackupRestore() {
-  document.getElementById("backup-btn").addEventListener("click", backupData);
+  document.getElementById("backup-btn").addEventListener("click", () => {
+    backupData().catch((e) => {
+      console.warn("Backup failed", e);
+      alert("Something went wrong creating the backup: " + (e && e.message ? e.message : e));
+    });
+  });
   document.getElementById("clear-all-btn").addEventListener("click", () => {
     clearAllData().catch((e) => {
       console.warn("Could not clear data", e);
@@ -1369,14 +1489,18 @@ function renderCategoryManager() {
   }
   container.innerHTML = names.map((name) => `
     <div class="category-row" data-category="${esc(name)}">
-      <input type="text" value="${esc(name)}" data-rename-input>
-      <span class="category-count">${categoryItemCount(name)} item(s)</span>
-      <label class="view-only-checkbox">
-        <input type="checkbox" data-visible-checkbox ${isCategoryHiddenFromViewOnly(name) ? "" : "checked"}>
-        Show in view-only link
-      </label>
-      <button type="button" class="btn-outline" data-rename-btn>Rename</button>
-      <button type="button" class="btn-danger" data-delete-btn>Delete</button>
+      <div class="category-row-top">
+        <input type="text" value="${esc(name)}" data-rename-input>
+        <span class="category-count">${categoryItemCount(name)} item(s)</span>
+        <label class="view-only-checkbox">
+          <input type="checkbox" data-visible-checkbox ${isCategoryHiddenFromViewOnly(name) ? "" : "checked"}>
+          Show in view-only link
+        </label>
+      </div>
+      <div class="category-row-actions">
+        <button type="button" class="btn-outline" data-rename-btn>Rename</button>
+        <button type="button" class="btn-danger" data-delete-btn>Delete</button>
+      </div>
     </div>
   `).join("");
 
@@ -1507,6 +1631,25 @@ function setupToolbar() {
     renderCategories();
   });
   document.getElementById("print-btn").addEventListener("click", () => window.print());
+
+  setupMoreMenu();
+}
+
+// The "More" menu (Manage categories / Backup / Restore / Share links /
+// Clear all data) is a native <details> element — closes it after picking
+// an action inside it, or on an outside click, so it doesn't sit open
+// behind whatever dialog/prompt that action opens.
+function setupMoreMenu() {
+  const menu = document.getElementById("more-menu");
+  if (!menu) return;
+
+  menu.querySelectorAll(".more-menu-panel button").forEach((btn) => {
+    btn.addEventListener("click", () => { menu.open = false; });
+  });
+
+  document.addEventListener("click", (e) => {
+    if (menu.open && !menu.contains(e.target)) menu.open = false;
+  });
 }
 
 // ---------- read-only mode ----------
@@ -1575,6 +1718,14 @@ document.addEventListener("DOMContentLoaded", async () => {
 
     items = applyReadonlyCategoryFilter(loadLocal());
     render();
+    // Genuinely nothing cached yet (first-ever open on this device) — say
+    // so instead of leaving the list looking empty/broken while the first
+    // syncAll() below is still in flight. Any later render (from syncAll,
+    // a filter, a realtime patch, ...) clears this via renderCategories().
+    if (items.length === 0) {
+      document.getElementById("loading-state").hidden = false;
+      document.getElementById("empty-state").hidden = true;
+    }
 
     try {
       supabaseClient = await initSupabase();
@@ -1592,6 +1743,14 @@ document.addEventListener("DOMContentLoaded", async () => {
         console.warn("Realtime subscription failed", e);
       }
     }
+
+    // Safety net for the realtime patching above: a full re-sync whenever
+    // the tab regains focus, in case an event was missed (e.g. this
+    // device was asleep/offline when it fired). Deliberately not on a
+    // timer — only when someone's actually back looking at it.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") syncAll();
+    });
 
     setupAutoUpdate();
   } catch (e) {

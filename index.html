@@ -44,19 +44,27 @@
       </select>
       <button id="attention-toggle" class="btn-outline">⚠ Needs attention only</button>
       <button id="print-btn" class="btn-outline">Print summary</button>
-      <button id="backup-btn" class="btn-outline">⬇ Backup</button>
-      <button id="restore-btn" class="btn-outline">⬆ Restore</button>
-      <input type="file" id="restore-input" accept="application/json" hidden>
-      <button id="manage-categories-btn" class="btn-outline">Manage categories</button>
       <button id="view-history-btn" class="btn-outline">🕒 History</button>
-      <button id="copy-share-link-btn" class="btn-outline">🔗 Copy view-only link</button>
-      <button id="email-share-link-btn" class="btn-outline">📧 Email view-only link</button>
-      <button id="clear-all-btn" class="btn-danger">🗑 Clear all data</button>
+
+      <details id="more-menu" class="more-menu">
+        <summary class="btn-outline">⋯ More</summary>
+        <div class="more-menu-panel">
+          <button id="manage-categories-btn" class="btn-outline">Manage categories</button>
+          <button id="backup-btn" class="btn-outline">⬇ Backup</button>
+          <button id="restore-btn" class="btn-outline">⬆ Restore</button>
+          <input type="file" id="restore-input" accept="application/json" hidden>
+          <button id="copy-share-link-btn" class="btn-outline">🔗 Copy view-only link</button>
+          <button id="email-share-link-btn" class="btn-outline">📧 Email view-only link</button>
+          <button id="clear-all-btn" class="btn-danger">🗑 Clear all data</button>
+        </div>
+      </details>
+
       <button id="add-item-btn" class="btn-primary">+ Add item</button>
     </div>
 
     <div id="categories"></div>
     <p id="empty-state" class="empty-state" hidden>No items match your search/filters.</p>
+    <p id="loading-state" class="empty-state" hidden>Loading your inventory…</p>
     <input type="file" id="quick-photo-input" accept="image/*" capture="environment" hidden>
   </main>
 
