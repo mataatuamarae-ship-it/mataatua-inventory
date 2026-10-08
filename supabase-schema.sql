@@ -55,6 +55,37 @@ create policy "public update" on inventory_items for update using (true);
 drop policy if exists "public delete" on inventory_items;
 create policy "public delete" on inventory_items for delete using (true);
 
+-- ---------- Photo storage (Supabase Storage) ----------
+-- Photos used to be stored as base64 text directly in inventory_items.photo_url
+-- — which meant every list fetch (and every realtime-triggered refetch, on
+-- every device) pulled every photo over the wire. That was the main driver
+-- behind the project going over its Supabase Egress limit. Photos now live
+-- in a Storage bucket instead; photo_url just holds a link to the file
+-- there, so a row/list fetch stays tiny no matter how many photos exist,
+-- and the image itself is served (and cached) separately, the normal way a
+-- browser caches any image.
+insert into storage.buckets (id, name, public, file_size_limit)
+values ('item-photos', 'item-photos', true, 5242880) -- 5MB ceiling per photo — plenty for a resized JPEG
+on conflict (id) do update set public = excluded.public, file_size_limit = excluded.file_size_limit;
+
+-- Same open-access approach as the tables above (anon key does everything —
+-- this is a small closed-community tool, not a public product).
+drop policy if exists "public read item-photos" on storage.objects;
+create policy "public read item-photos" on storage.objects
+  for select using (bucket_id = 'item-photos');
+
+drop policy if exists "public upload item-photos" on storage.objects;
+create policy "public upload item-photos" on storage.objects
+  for insert with check (bucket_id = 'item-photos');
+
+drop policy if exists "public update item-photos" on storage.objects;
+create policy "public update item-photos" on storage.objects
+  for update using (bucket_id = 'item-photos');
+
+drop policy if exists "public delete item-photos" on storage.objects;
+create policy "public delete item-photos" on storage.objects
+  for delete using (bucket_id = 'item-photos');
+
 -- Enable realtime so multiple devices see edits live (safe to re-run)
 do $$
 begin

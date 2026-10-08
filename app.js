@@ -56,6 +56,11 @@ const HISTORY_KEY = "mataatua-inventory:history";
 const HISTORY_TOMBSTONE_KEY = "mataatua-inventory:history-tombstones";
 const DEVICE_NAME_KEY = "mataatua-inventory:device-name";
 
+// Where photos live in Supabase Storage. One file per item (named by the
+// item's id), overwritten in place whenever the photo changes — see the
+// "photos" section below for why.
+const PHOTO_BUCKET = "item-photos";
+
 // A name for this device/browser, shown against each history entry so you
 // can tell which phone/tablet/computer made a change. Asked for once, the
 // first time it's needed, then remembered — changeable any time from the
@@ -354,8 +359,16 @@ async function flushQueue() {
   for (const op of q) {
     try {
       if (op.type === "upsert") {
-        const { error } = await supabaseClient.from("inventory_items").upsert(withoutLocalUpdatedAt(op.row));
+        // A photo taken while offline is still a data: URL at this point —
+        // upload it to Storage now that we're back online, same as the
+        // normal save path does, before writing the row itself.
+        const uploaded = await preparePhotoForUpload(op.row);
+        const { error } = await supabaseClient.from("inventory_items").upsert(withoutLocalUpdatedAt(uploaded));
         if (error) throw error;
+        if (uploaded.photo_url !== op.row.photo_url) {
+          localUpsert(uploaded);
+          render();
+        }
       } else if (op.type === "delete") {
         const { error } = await supabaseClient.from("inventory_items").delete().eq("id", op.id);
         if (error) throw error;
@@ -548,17 +561,36 @@ async function saveItem(row) {
     }).catch(() => {});
   }
 
+  // The photo was removed outright (not replaced with a new one) and the
+  // old one was already in Storage — clean it up. Best-effort; a photo
+  // left behind just wastes a little space, it never breaks anything.
+  if (previous && previous.photo_url && !isDataUrlPhoto(previous.photo_url) && !row.photo_url) {
+    deletePhotoFromStorage(row.id);
+  }
+
+  // Show the change instantly with whatever photo we have locally — a
+  // freshly taken one is still a data: URL at this point. Uploading it to
+  // Storage (below) can take a moment on a slow connection.
   localUpsert(row);
   render();
 
   if (supabaseClient) {
     try {
-      const { error } = await supabaseClient.from("inventory_items").upsert(withoutLocalUpdatedAt(row));
+      const uploaded = await preparePhotoForUpload(row);
+      const { error } = await supabaseClient.from("inventory_items").upsert(withoutLocalUpdatedAt(uploaded));
       if (error) throw error;
+      // Swap the local copy over to the real Storage link too, so it isn't
+      // still carrying the old base64 photo around afterwards.
+      if (uploaded.photo_url !== row.photo_url) {
+        row.photo_url = uploaded.photo_url;
+        localUpsert(row);
+        render();
+      }
       setStatus("online", "online");
       return;
     } catch (e) {
-      // fall through to queue
+      // fall through to queue — including a failed photo upload, so both
+      // the upload and the save are retried together once back online.
     }
   }
   queueOp({ type: "upsert", row });
@@ -566,8 +598,12 @@ async function saveItem(row) {
 }
 
 async function deleteItem(id) {
+  const item = items.find((i) => i.id === id);
   localDelete(id);
   render();
+  if (item && item.photo_url && !isDataUrlPhoto(item.photo_url)) {
+    deletePhotoFromStorage(id);
+  }
   if (supabaseClient) {
     try {
       const { error } = await supabaseClient.from("inventory_items").delete().eq("id", id);
@@ -759,9 +795,62 @@ function esc(s) {
 
 // ---------- photos ----------
 
-// Photos are stored as compressed JPEG data URLs directly on the item —
-// no separate storage bucket to set up, and they sync/work offline exactly
-// like every other field.
+// A photo is first turned into a compressed JPEG data URL right on the
+// device (below) — that part still works fully offline, same as before.
+// Before it's sent to Supabase, saveItem/flushQueue hand it to
+// preparePhotoForUpload, which uploads it to Storage and swaps photo_url
+// over to a link instead. That's what keeps a plain list/row fetch small
+// no matter how many photos exist — a full base64 photo on every item was
+// what pushed the project over its Supabase Egress limit.
+
+function isDataUrlPhoto(url) {
+  return typeof url === "string" && url.startsWith("data:");
+}
+
+function dataUrlToBlob(dataUrl) {
+  return fetch(dataUrl).then((r) => r.blob());
+}
+
+// Uploads a photo to Storage, overwriting any previous photo for this item
+// (same fixed path every time — item-id.jpg — so replacing a photo never
+// leaves an old copy behind). The ?v= on the returned URL forces browsers
+// to fetch the new image instead of a cached copy of the old one at that
+// same path.
+async function uploadPhotoToStorage(itemId, dataUrl) {
+  const blob = await dataUrlToBlob(dataUrl);
+  const path = `${itemId}.jpg`;
+  const { error } = await supabaseClient.storage
+    .from(PHOTO_BUCKET)
+    .upload(path, blob, { upsert: true, contentType: "image/jpeg", cacheControl: "3600" });
+  if (error) throw error;
+  const { data } = supabaseClient.storage.from(PHOTO_BUCKET).getPublicUrl(path);
+  return data.publicUrl + "?v=" + Date.now();
+}
+
+// Best-effort cleanup — a photo left behind in Storage after a delete/
+// removal just wastes a little space, it never breaks anything, so this
+// never throws.
+async function deletePhotoFromStorage(itemId) {
+  if (!supabaseClient) return;
+  try {
+    await supabaseClient.storage.from(PHOTO_BUCKET).remove([`${itemId}.jpg`]);
+  } catch (e) {
+    console.warn("Could not remove stored photo for", itemId, e);
+  }
+}
+
+// Turns a freshly taken/changed photo (still a data: URL at this point)
+// into a Storage link before a row is sent to Supabase. Anything else
+// (already a Storage link, or no photo) is left untouched. Errors
+// propagate so the caller falls back to queuing the save for later instead
+// of sending a giant base64 string to the database.
+async function preparePhotoForUpload(row) {
+  if (!isDataUrlPhoto(row.photo_url)) return row;
+  if (!supabaseClient) throw new Error("not connected");
+  const url = await uploadPhotoToStorage(row.id, row.photo_url);
+  return { ...row, photo_url: url };
+}
+
 function loadImageViaObjectUrl(file) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
@@ -1233,6 +1322,7 @@ async function clearAllData() {
     setStatus("online", "online");
     return;
   }
+  await clearAllPhotosFromStorage();
 
   // Clear every local trace too, including anything still queued from
   // before this — it would only try to recreate what we just deleted.
@@ -1248,6 +1338,70 @@ async function clearAllData() {
   alert("All data has been cleared for everyone.");
 }
 
+// Wipes every file in the photos bucket — the Storage counterpart to the
+// row deletes above. Best-effort, like deletePhotoFromStorage: if this
+// partially fails, the rows are already gone either way, so it's never
+// worth blocking or re-alarming the person over a few leftover files.
+async function clearAllPhotosFromStorage() {
+  if (!supabaseClient) return;
+  try {
+    const { data, error } = await supabaseClient.storage.from(PHOTO_BUCKET).list("", { limit: 1000 });
+    if (error) throw error;
+    const paths = (data || []).map((f) => f.name);
+    if (paths.length > 0) {
+      await supabaseClient.storage.from(PHOTO_BUCKET).remove(paths);
+    }
+  } catch (e) {
+    console.warn("Could not clear stored photos", e);
+  }
+}
+
+// One-time (but safe to run again any time) cleanup for photos saved
+// before the move to Storage — they're still sitting in inventory_items as
+// base64 data: URLs, which is exactly the thing this migration is meant to
+// get rid of. Normal use never needs this: saveItem/flushQueue upload a
+// photo to Storage the moment it's taken. This is only for whatever was
+// already in the database beforehand.
+async function migrateLegacyPhotos() {
+  if (!supabaseClient) {
+    alert("This needs to be online to move photos to Storage — try again once connected.");
+    return;
+  }
+  const legacy = items.filter((i) => isDataUrlPhoto(i.photo_url));
+  if (legacy.length === 0) {
+    alert("Nothing to move — every photo is already in Storage.");
+    return;
+  }
+  if (!confirm(
+    `Move ${legacy.length} photo(s) still stored the old way into Storage now? ` +
+    `This can take a little while depending on how many there are, and how good the connection is.`
+  )) return;
+
+  let done = 0;
+  let failed = 0;
+  for (const item of legacy) {
+    setStatus(`moving photos to storage (${done + failed}/${legacy.length})…`, "syncing");
+    try {
+      const url = await uploadPhotoToStorage(item.id, item.photo_url);
+      const updated = { ...item, photo_url: url };
+      const { error } = await supabaseClient.from("inventory_items").upsert(withoutLocalUpdatedAt(updated));
+      if (error) throw error;
+      localUpsert(updated);
+      done++;
+    } catch (e) {
+      console.warn("Could not move photo to storage for", item.id, e);
+      failed++;
+    }
+    render();
+  }
+  setStatus("online", "online");
+  render();
+  alert(
+    `Moved ${done} photo(s) to Storage.` +
+    (failed > 0 ? ` ${failed} couldn't be moved this time — they'll keep working as before, try again later.` : "")
+  );
+}
+
 function setupBackupRestore() {
   document.getElementById("backup-btn").addEventListener("click", () => {
     backupData().catch((e) => {
@@ -1259,6 +1413,13 @@ function setupBackupRestore() {
     clearAllData().catch((e) => {
       console.warn("Could not clear data", e);
       alert("Something went wrong: " + (e && e.message ? e.message : e));
+    });
+  });
+  document.getElementById("migrate-photos-btn").addEventListener("click", () => {
+    migrateLegacyPhotos().catch((e) => {
+      console.warn("Could not move photos to storage", e);
+      alert("Something went wrong: " + (e && e.message ? e.message : e));
+      setStatus("online", "online");
     });
   });
   const restoreInput = document.getElementById("restore-input");

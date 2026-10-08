@@ -584,7 +584,8 @@ body.readonly-mode #manage-categories-btn,
 body.readonly-mode #clear-all-btn,
 body.readonly-mode #restore-btn,
 body.readonly-mode #copy-share-link-btn,
-body.readonly-mode #email-share-link-btn {
+body.readonly-mode #email-share-link-btn,
+body.readonly-mode #migrate-photos-btn {
   display: none;
 }
 
